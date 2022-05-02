@@ -1684,10 +1684,6 @@ func (v *Viper) SafeWriteConfigAs(filename string) error {
 }
 
 func (v *Viper) writeConfig(filename string, force bool) error {
-	v.locker.Lock()
-
-	defer v.locker.Unlock()
-
 	v.logger.Info("attempting to write configuration to file")
 
 	var configType string
@@ -1705,9 +1701,15 @@ func (v *Viper) writeConfig(filename string, force bool) error {
 	if !stringInSlice(configType, SupportedExts) {
 		return UnsupportedConfigError(configType)
 	}
+
+	v.locker.Lock()
+
 	if v.config == nil {
 		v.config = make(map[string]interface{})
 	}
+
+	v.locker.Unlock()
+
 	flags := os.O_CREATE | os.O_TRUNC | os.O_WRONLY
 	if !force {
 		flags |= os.O_EXCL
