@@ -222,6 +222,9 @@ type Viper struct {
 	// TODO: should probably be protected with a mutex
 	encoderRegistry *encoding.EncoderRegistry
 	decoderRegistry *encoding.DecoderRegistry
+
+	// Mutex lock for read and write
+	locker *sync.RWMutex
 }
 
 // New returns an initialized Viper instance.
@@ -240,6 +243,7 @@ func New() *Viper {
 	v.aliases = make(map[string]string)
 	v.typeByDefValue = false
 	v.logger = jwwLogger{}
+	v.locker = new(sync.RWMutex)
 
 	v.resetEncoding()
 
@@ -892,7 +896,11 @@ func (v *Viper) Get(key string) interface{} {
 		// TODO(bep) this branch isn't covered by a single test.
 		valType := val
 		path := strings.Split(lcaseKey, v.keyDelim)
+
+		v.locker.RLock()
 		defVal := v.searchMap(v.defaults, path)
+		v.locker.RUnlock()
+
 		if defVal != nil {
 			valType = defVal
 		}
@@ -1169,7 +1177,11 @@ func (v *Viper) BindFlagValue(key string, flag FlagValue) error {
 	if flag == nil {
 		return fmt.Errorf("flag for %q is nil", key)
 	}
+
+	v.locker.Lock()
 	v.pflags[strings.ToLower(key)] = flag
+	v.locker.Unlock()
+
 	return nil
 }
 
@@ -1186,6 +1198,8 @@ func (v *Viper) BindEnv(input ...string) error {
 		return fmt.Errorf("missing key to bind to")
 	}
 
+	v.locker.Lock()
+
 	key := strings.ToLower(input[0])
 
 	if len(input) == 1 {
@@ -1193,6 +1207,8 @@ func (v *Viper) BindEnv(input ...string) error {
 	} else {
 		v.env[key] = append(v.env[key], input[1:]...)
 	}
+
+	v.locker.Unlock()
 
 	return nil
 }
@@ -1207,6 +1223,10 @@ func (v *Viper) BindEnv(input ...string) error {
 //
 // Note: this assumes a lower-cased key given.
 func (v *Viper) find(lcaseKey string, flagDefault bool) interface{} {
+	v.locker.RLock()
+
+	defer v.locker.RUnlock()
+
 	var (
 		val    interface{}
 		exists bool
@@ -1413,9 +1433,13 @@ func (v *Viper) RegisterAlias(alias string, key string) {
 func (v *Viper) registerAlias(alias string, key string) {
 	alias = strings.ToLower(alias)
 	if alias != key && alias != v.realKey(key) {
+		v.locker.RLock()
 		_, exists := v.aliases[alias]
+		v.locker.RUnlock()
 
 		if !exists {
+			v.locker.Lock()
+
 			// if we alias something that exists in one of the maps to another
 			// name, we'll never be able to get that value using the original
 			// name, so move the config value to the new realkey.
@@ -1436,6 +1460,8 @@ func (v *Viper) registerAlias(alias string, key string) {
 				v.override[key] = val
 			}
 			v.aliases[alias] = key
+
+			v.locker.Unlock()
 		}
 	} else {
 		v.logger.Warn("creating circular reference alias", "alias", alias, "key", key, "real_key", v.realKey(key))
@@ -1443,6 +1469,10 @@ func (v *Viper) registerAlias(alias string, key string) {
 }
 
 func (v *Viper) realKey(key string) string {
+	v.locker.RLock()
+
+	defer v.locker.RUnlock()
+
 	newkey, exists := v.aliases[key]
 	if exists {
 		v.logger.Debug("key is an alias", "alias", key, "to", newkey)
@@ -1462,6 +1492,10 @@ func (v *Viper) InConfig(key string) bool {
 	lcaseKey = v.realKey(lcaseKey)
 	path := strings.Split(lcaseKey, v.keyDelim)
 
+	v.locker.RLock()
+
+	defer v.locker.RUnlock()
+
 	return v.searchIndexableWithPathPrefixes(v.config, path) != nil
 }
 
@@ -1477,10 +1511,15 @@ func (v *Viper) SetDefault(key string, value interface{}) {
 
 	path := strings.Split(key, v.keyDelim)
 	lastKey := strings.ToLower(path[len(path)-1])
+
+	v.locker.Lock()
+
 	deepestMap := deepSearch(v.defaults, path[0:len(path)-1])
 
 	// set innermost value
 	deepestMap[lastKey] = value
+
+	v.locker.Unlock()
 }
 
 // Set sets the value for the key in the override register.
@@ -1496,10 +1535,15 @@ func (v *Viper) Set(key string, value interface{}) {
 
 	path := strings.Split(key, v.keyDelim)
 	lastKey := strings.ToLower(path[len(path)-1])
+
+	v.locker.Lock()
+
 	deepestMap := deepSearch(v.override, path[0:len(path)-1])
 
 	// set innermost value
 	deepestMap[lastKey] = value
+
+	v.locker.Unlock()
 }
 
 // ReadInConfig will discover and load the configuration file from disk
@@ -1530,7 +1574,10 @@ func (v *Viper) ReadInConfig() error {
 		return err
 	}
 
+	v.locker.Lock()
 	v.config = config
+	v.locker.Unlock()
+
 	return nil
 }
 
@@ -1561,6 +1608,10 @@ func (v *Viper) MergeInConfig() error {
 func ReadConfig(in io.Reader) error { return v.ReadConfig(in) }
 
 func (v *Viper) ReadConfig(in io.Reader) error {
+	v.locker.Lock()
+
+	defer v.locker.Unlock()
+
 	v.config = make(map[string]interface{})
 	return v.unmarshalReader(in, v.config)
 }
@@ -1581,6 +1632,10 @@ func (v *Viper) MergeConfig(in io.Reader) error {
 func MergeConfigMap(cfg map[string]interface{}) error { return v.MergeConfigMap(cfg) }
 
 func (v *Viper) MergeConfigMap(cfg map[string]interface{}) error {
+	v.locker.Lock()
+
+	defer v.locker.Unlock()
+
 	if v.config == nil {
 		v.config = make(map[string]interface{})
 	}
@@ -1629,6 +1684,10 @@ func (v *Viper) SafeWriteConfigAs(filename string) error {
 }
 
 func (v *Viper) writeConfig(filename string, force bool) error {
+	v.locker.Lock()
+
+	defer v.locker.Unlock()
+
 	v.logger.Info("attempting to write configuration to file")
 
 	var configType string
@@ -1857,7 +1916,9 @@ func (v *Viper) getKeyValueConfig() error {
 			continue
 		}
 
+		v.locker.Lock()
 		v.kvstore = val
+		v.locker.Unlock()
 
 		return nil
 	}
@@ -1869,7 +1930,11 @@ func (v *Viper) getRemoteConfig(provider RemoteProvider) (map[string]interface{}
 	if err != nil {
 		return nil, err
 	}
+
+	v.locker.Lock()
 	err = v.unmarshalReader(reader, v.kvstore)
+	v.locker.Unlock()
+
 	return v.kvstore, err
 }
 
@@ -1882,7 +1947,10 @@ func (v *Viper) watchKeyValueConfigOnChannel() error {
 			for {
 				b := <-rc
 				reader := bytes.NewReader(b.Value)
+
+				v.locker.Lock()
 				v.unmarshalReader(reader, v.kvstore)
+				v.locker.Unlock()
 			}
 		}(respc)
 		return nil
@@ -1897,7 +1965,11 @@ func (v *Viper) watchKeyValueConfig() error {
 		if err != nil {
 			continue
 		}
+
+		v.locker.Lock()
 		v.kvstore = val
+		v.locker.Unlock()
+
 		return nil
 	}
 	return RemoteConfigError("No Files Found")
@@ -1908,7 +1980,11 @@ func (v *Viper) watchRemoteConfig(provider RemoteProvider) (map[string]interface
 	if err != nil {
 		return nil, err
 	}
+
+	v.locker.Lock()
 	err = v.unmarshalReader(reader, v.kvstore)
+	v.locker.Unlock()
+
 	return v.kvstore, err
 }
 
@@ -1917,6 +1993,10 @@ func (v *Viper) watchRemoteConfig(provider RemoteProvider) (map[string]interface
 func AllKeys() []string { return v.AllKeys() }
 
 func (v *Viper) AllKeys() []string {
+	v.locker.RLock()
+
+	defer v.locker.RUnlock()
+
 	m := map[string]bool{}
 	// add all paths, by order of descending priority to ensure correct shadowing
 	m = v.flattenAndMergeMap(m, castMapStringToMapInterface(v.aliases), "")
